@@ -5,5 +5,3 @@ if %errorlevel% neq 0 (
   exit /b
 )
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0test-pc.ps1"
-echo.
-pause

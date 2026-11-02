@@ -34,6 +34,12 @@ function Get-Temp {
 }
 
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $isAdmin -and $PSCommandPath) {
+    Write-Host "Demande des droits administrateur... clique sur OUI." -ForegroundColor Yellow
+    $p = Start-Process powershell -Verb RunAs -PassThru -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
+    if ($p) { exit }
+    Write-Host "Droits admin refusés : le test continue en mode limité." -ForegroundColor Yellow
+}
 Clear-Host
 Write-Host "=========== TEST COMPLET DU PC ===========" -ForegroundColor Cyan
 Write-Host "Durée : 3 à 6 minutes. Ne touche à rien pendant le test." -ForegroundColor Cyan
@@ -384,3 +390,6 @@ Write-Host "`nRapport : $out" -ForegroundColor Green
 Write-Host "OK: $($nb.ok)   A surveiller: $($nb.warn)   Problemes: $($nb.bad)" -ForegroundColor Cyan
 Write-Host ("VERDICT : " + ($vt -replace '^\S+\s', '')) -ForegroundColor @{ ok = 'Green'; warn = 'Yellow'; bad = 'Red' }[$vc]
 Start-Process $out
+
+Write-Host ""
+Read-Host "Test terminé. Appuie sur Entrée pour fermer"
