@@ -115,7 +115,8 @@ if ($r[0] -eq 0) { Add-R 'RAM' 'Test rapide' "$($r[1]) Mo testés, 0 erreur" 'ok
 if (@($mods).Count -eq 1) { Add-R 'RAM' 'Dual channel' '1 seule barrette = single channel, perd des FPS (prévoir une 2e barrette)' 'warn' }
 else { Add-R 'RAM' 'Dual channel' "$(@($mods).Count) barrettes" 'ok' }
 $m0 = @($mods)[0]
-if ($m0.Speed -and $m0.ConfiguredClockSpeed -and $m0.ConfiguredClockSpeed -lt $m0.Speed * 0.9) {
+$isLaptop = [bool](Get-CimInstance Win32_Battery) -or (@((Get-CimInstance Win32_SystemEnclosure).ChassisTypes) | Where-Object { $_ -in 8, 9, 10, 14, 31 })
+if (-not $isLaptop -and $m0.Speed -and $m0.ConfiguredClockSpeed -and $m0.ConfiguredClockSpeed -lt $m0.Speed * 0.9) {
     Add-R 'RAM' 'XMP / EXPO' "RAM à $($m0.ConfiguredClockSpeed) MHz au lieu de $($m0.Speed) : profil XMP pas activé dans le BIOS (pas une panne, se règle en 1 min)" 'warn'
 }
 
@@ -155,7 +156,9 @@ $vram = @{}
 Get-ItemProperty 'HKLM:\SYSTEM\ControlSet001\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0*' | ForEach-Object {
     if ($_.'HardwareInformation.qwMemorySize') { $vram[$_.DriverDesc] = [math]::Round($_.'HardwareInformation.qwMemorySize' / 1GB, 1) }
 }
-foreach ($g in Get-CimInstance Win32_VideoController) {
+$virt = 'Parsec|Virtual|Basic Display|Remote|Meta|Citrix|VMware|Hyper-V|DisplayLink|Spacedesk|IddSample'
+$gpus = @(Get-CimInstance Win32_VideoController | Where-Object { $_.Name -notmatch $virt })
+foreach ($g in $gpus) {
     $vr = if ($vram[$g.Name]) { "$($vram[$g.Name]) Go" } else { "?" }
     Add-R 'GPU' $g.Name "VRAM $vr - pilote $($g.DriverVersion) - $($g.CurrentHorizontalResolution)x$($g.CurrentVerticalResolution)" $(if ($g.Status -eq 'OK') { 'ok' } else { 'bad' })
 }
@@ -172,7 +175,7 @@ if ($smi) {
         Add-R 'GPU' 'Port PCIe' "x$($f[4]) sur x$($f[5]) possible" $st
     }
 }
-$dedic = Get-CimInstance Win32_VideoController | Where-Object { $_.Name -match 'GeForce|RTX|GTX|Radeon RX|Arc' }
+$dedic = $gpus | Where-Object { $_.Name -match 'GeForce|RTX|GTX|Radeon RX|Arc' }
 if (-not $dedic) { Add-R 'GPU' 'Carte graphique dédiée' "Aucune détectée ! Vérifie que l'écran est branché sur la carte graphique et pas sur la carte mère" 'bad' }
 
 # ---------------------------------------------------------------- BATTERIE
@@ -212,13 +215,22 @@ $since = (Get-Date).AddDays(-30)
 $checks = @(
     @{ L = 'Écrans bleus (BSOD)'; F = @{ LogName = 'System'; ProviderName = 'Microsoft-Windows-WER-SystemErrorReporting'; Id = 1001; StartTime = $since } },
     @{ L = 'Arrêts brutaux / coupures'; F = @{ LogName = 'System'; ProviderName = 'Microsoft-Windows-Kernel-Power'; Id = 41; StartTime = $since } },
-    @{ L = 'Erreurs matérielles (WHEA)'; F = @{ LogName = 'System'; ProviderName = 'Microsoft-Windows-WHEA-Logger'; StartTime = $since } },
-    @{ L = 'Erreurs disque'; F = @{ LogName = 'System'; ProviderName = 'disk'; Id = 7, 11, 51, 153; StartTime = $since } }
+    @{ L = 'Erreurs matérielles (WHEA)'; F = @{ LogName = 'System'; ProviderName = 'Microsoft-Windows-WHEA-Logger'; StartTime = $since } }
 )
 foreach ($c in $checks) {
     $n = @(Get-WinEvent -FilterHashtable $c.F -MaxEvents 200).Count
     Add-R 'Plantages' $c.L $n $(if ($n -gt 2) { 'bad' } elseif ($n -gt 0) { 'warn' } else { 'ok' })
 }
+$sysDisk = (Get-Partition -DriveLetter C).DiskNumber
+if ($null -eq $sysDisk) { $sysDisk = 0 }
+$dEv = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'disk'; Id = 7, 11, 51, 153; StartTime = $since } -MaxEvents 300)
+$onSys = 0; $onOther = 0
+foreach ($e in $dEv) {
+    $m = [regex]::Match("$($e.Message)", '(?:Harddisk|DR|[Dd]isque |[Dd]isk )(\d+)')
+    if ($m.Success -and [int]$m.Groups[1].Value -ne $sysDisk) { $onOther++ } else { $onSys++ }
+}
+Add-R 'Plantages' 'Erreurs sur le disque principal' $onSys $(if ($onSys -gt 2) { 'bad' } elseif ($onSys -gt 0) { 'warn' } else { 'ok' })
+if ($onOther) { Add-R 'Plantages' 'Erreurs sur clés USB / disques externes' "$onOther (pas grave pour le PC, ça vient d'un périphérique branché)" 'info' }
 
 # ---------------------------------------------------------------- CONFORMITE ANNONCE
 Step "Comparaison avec l'annonce"
@@ -231,7 +243,7 @@ function Add-C($comp, $ann, $reel, $st, $note = '') {
 $cpuName = $cpu.Name.Trim()
 Add-C 'Processeur' $ANNONCE.CPU $cpuName $(if ($cpuName -match [regex]::Escape($ANNONCE.CPU)) { 'ok' } else { 'bad' })
 
-$gpuAll = (Get-CimInstance Win32_VideoController).Name -join ' / '
+$gpuAll = $gpus.Name -join ' / '
 Add-C 'Carte graphique' $ANNONCE.GPU $gpuAll $(if ($gpuAll -match $ANNONCE.GPU) { 'ok' } else { 'bad' })
 $vramGo = if ($smi -and $f.Count -ge 7) { [math]::Round([double]$f[6] / 1024, 1) } else { ($vram.Values | Measure-Object -Maximum).Maximum }
 if ($vramGo) {
@@ -276,7 +288,7 @@ $badList = @($conf | Where-Object Status -eq 'bad' | ForEach-Object { "$($_.Comp
            @($results | Where-Object Status -eq 'bad' | ForEach-Object { "$($_.Item) : $($_.Val)" })
 $warnList = @($conf | Where-Object Status -eq 'warn' | ForEach-Object { "$($_.Comp) : $($_.Reel). $($_.Note)" }) +
             @($results | Where-Object Status -eq 'warn' | ForEach-Object { "$($_.Item) : $($_.Val)" })
-$goodKeys = 'Stress test', 'Test rapide', 'état', 'Écrans bleus', 'Arrêts brutaux', 'Erreurs matérielles', 'Gestionnaire de périphériques', 'Port PCIe', 'Scan erreurs'
+$goodKeys = 'Stress test', 'Test rapide', 'état', 'Écrans bleus', 'Arrêts brutaux', 'Erreurs matérielles', 'disque principal', 'Gestionnaire de périphériques', 'Port PCIe', 'Scan erreurs'
 $goodList = @($results | Where-Object { $it = $_.Item; $_.Status -eq 'ok' -and @($goodKeys | Where-Object { $it -like "*$_*" }).Count -gt 0 } | ForEach-Object { "$($_.Item) : $($_.Val)" })
 $nConfOk = @($conf | Where-Object Status -eq 'ok').Count
 
